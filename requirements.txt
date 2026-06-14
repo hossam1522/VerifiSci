@@ -1,0 +1,5 @@
+scholarly>=1.7.0
+requests>=2.28.0
+bibtexparser>=1.4.0
+arxiv>=2.1.0
+PyPDF2>=3.0.0

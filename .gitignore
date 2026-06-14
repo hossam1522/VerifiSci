@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cache
+~/.cache/verifisci/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
