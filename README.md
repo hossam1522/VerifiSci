@@ -174,6 +174,22 @@ The default JSON output includes all fields an LLM agent needs:
 - Set env var: `export SEMANTIC_SCHOLAR_API_KEY=your_key_here`
 - Or pass via CLI: `--semantic-key YOUR_KEY`
 - Without key: very limited rate limits
+- **Note on new keys:** even after the "your key has been approved" email, Semantic
+  Scholar's own docs warn it can take up to 24h for the key to actually propagate to
+  their auth backend — a fresh key returning 429 for the first few hours is expected,
+  not a sign it's misconfigured.
+- **HTTP/2 is required**, not just the key. Semantic Scholar's edge (CloudFront) 429s
+  requests made over HTTP/1.1 — which is what `requests`/plain `curl` speak by
+  default — even with a valid, active key and correct `x-api-key` header. It only lets
+  HTTP/2 requests through reliably. This is why Semantic Scholar calls in this codebase
+  go through `httpx` (`safe_get_http2`/`HTTP2_CLIENT`, `http2=True`) instead of the
+  `requests`-based `safe_get` used for the other sources. If you add another Semantic
+  Scholar endpoint, reuse `safe_get_http2`, not `safe_get` — the latter will look like
+  it's failing due to rate limits when the real cause is the protocol.
+- The `fields` query parameter only accepts Semantic Scholar's documented top-level
+  fields. `volume` and `pages` are **not** top-level fields (the API returns a `400`
+  for them) — they exist only nested inside `journal` (`journal.volume`,
+  `journal.pages`), which is already requested via the `journal` field.
 
 ### Google Scholar
 - **No API key** (but uses scraping, may get rate-limited)
