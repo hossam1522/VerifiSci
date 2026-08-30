@@ -38,7 +38,8 @@ jobs:
           for p in "${platforms[@]}"; do
             IFS="/" read -r os arch filename <<< "$p"
             echo "Building $filename for $os/$arch..."
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="-s -w" -o dist/$filename .
+            LDFLAGS="-s -w -X github.com/hossam1522/VerifiSci/cmd.Version=${TAG_NAME} -X github.com/hossam1522/VerifiSci/cmd.Commit=${GITHUB_SHA::7} -X github.com/hossam1522/VerifiSci/cmd.BuildDate=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="$LDFLAGS" -o dist/$filename .
             if [ "$os" = "windows" ]; then
               zip -j "dist/verifisci-${TAG_NAME}-${os}-${arch}.zip" "dist/$filename"
             else

@@ -8,16 +8,21 @@ import (
 )
 
 var (
+	Version   = "v1.0.0"
+	Commit    = "none"
+	BuildDate = "unknown"
+
 	semanticKeyFlag string
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "verifisci",
-	Short: "VerifiSci - CLI academic search and citation tool for LLM agents",
+	Use:     "verifisci",
+	Short:   "VerifiSci - CLI academic search and citation tool for LLM agents",
+	Version: fmt.Sprintf("%s (commit: %s, built: %s)", Version, Commit, BuildDate),
 	Long: `VerifiSci is a CLI tool for searching academic sources and generating citations.
 Designed for LLM agents to find reliable academic references for writing articles/theses.
 
-Sources: Semantic Scholar, Google Scholar, CrossRef, OpenAlex, arXiv`,
+Sources: Semantic Scholar, CrossRef, OpenAlex, arXiv`,
 }
 
 func Execute() {

@@ -2,6 +2,7 @@ package sources
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -109,6 +110,11 @@ func SearchAll(query string, limit int, yearFrom string, yearTo string, sortOrde
 	}, nil
 }
 
+var (
+	arxivIDPattern = regexp.MustCompile(`^(?i)(?:arxiv:)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[a-z\-]+)?/\d{7}(?:v\d+)?)$`)
+	doiURLPattern  = regexp.MustCompile(`^(?i)(?:https?://(?:dx\.)?doi\.org/)?(10\.\d{4,9}/[-._;()/:A-Za-z0-9]+)$`)
+)
+
 func ExtractIdentifierInfo(identifier string, idType string) (resolvedID string, resolvedType string) {
 	idType = strings.ToUpper(strings.TrimSpace(idType))
 	identifier = strings.TrimSpace(identifier)
@@ -121,9 +127,13 @@ func ExtractIdentifierInfo(identifier string, idType string) (resolvedID string,
 		parts := strings.Split(identifier, "arxiv.org/pdf/")
 		return strings.Trim(parts[len(parts)-1], "/.pdf"), "ARXIV"
 	}
-	if strings.Contains(identifier, "doi.org/") {
-		parts := strings.Split(identifier, "doi.org/")
-		return strings.Trim(parts[len(parts)-1], "/"), "DOI"
+	if m := doiURLPattern.FindStringSubmatch(identifier); len(m) > 1 {
+		return m[1], "DOI"
+	}
+
+	// Auto-detect arXiv ID even if type wasn't explicitly passed
+	if m := arxivIDPattern.FindStringSubmatch(identifier); len(m) > 1 {
+		return m[1], "ARXIV"
 	}
 
 	if idType == "" {
