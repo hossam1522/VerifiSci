@@ -4,25 +4,44 @@ Fast, standalone CLI tool for academic paper search and citation generation. Bui
 
 ## Installation
 
-### Option 1: Download Pre-compiled Binary (Recommended)
-Download the latest binary for your OS and architecture from [GitHub Releases](https://github.com/hossam1522/VerifiSci/releases):
+### Option 1: Quick Install (Recommended)
+
+Automatically detects your OS (Linux, macOS) and architecture (x86_64, ARM64), downloads the latest release, and installs it:
 
 ```bash
-# Linux (x86_64)
-curl -sSL https://github.com/hossam1522/VerifiSci/releases/latest/download/verifisci-linux-amd64.tar.gz | tar -xz
-sudo mv verifisci-linux-amd64 /usr/local/bin/verifisci
-
-# macOS (Apple Silicon M1-M4)
-curl -sSL https://github.com/hossam1522/VerifiSci/releases/latest/download/verifisci-darwin-arm64.tar.gz | tar -xz
-sudo mv verifisci-darwin-arm64 /usr/local/bin/verifisci
+curl -fsSL https://raw.githubusercontent.com/hossam1522/VerifiSci/main/install.sh | bash
 ```
 
-### Option 2: Using `go install`
+Or if you prefer a standalone shell command without downloading a script:
+
+```bash
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')"
+VERSION="$(curl -sSLI -o /dev/null -w '%{url_effective}' https://github.com/hossam1522/VerifiSci/releases/latest | grep -oE '[^/]+$')"
+curl -sSL "https://github.com/hossam1522/VerifiSci/releases/download/${VERSION}/verifisci-${VERSION}-${OS}-${ARCH}.tar.gz" | tar -xz
+sudo mv "verifisci-${OS}-${ARCH}" /usr/local/bin/verifisci
+```
+
+### Option 2: Manual Download
+
+Download the archive matching your platform from [GitHub Releases](https://github.com/hossam1522/VerifiSci/releases):
+
+| Platform | Architecture | Archive |
+|---|---|---|
+| **Linux** | x86_64 (`amd64`) | `verifisci-v1.0.0-linux-amd64.tar.gz` |
+| **Linux** | ARM64 (`arm64`, `aarch64`) | `verifisci-v1.0.0-linux-arm64.tar.gz` |
+| **macOS** | Apple Silicon (`arm64`, M1–M4) | `verifisci-v1.0.0-darwin-arm64.tar.gz` |
+| **macOS** | Intel (`amd64`, x86_64) | `verifisci-v1.0.0-darwin-amd64.tar.gz` |
+| **Windows** | x86_64 (`amd64`) | `verifisci-v1.0.0-windows-amd64.zip` |
+
+Extract and place the binary into a directory in your `PATH` (e.g. `/usr/local/bin/verifisci`).
+
+### Option 3: Using `go install`
 ```bash
 go install github.com/hossam1522/VerifiSci@latest
 ```
 
-### Option 3: Build from Source
+### Option 4: Build from Source
 ```bash
 git clone https://github.com/hossam1522/VerifiSci.git
 cd VerifiSci
@@ -279,7 +298,7 @@ verifisci read 1706.03762 --type ARXIV --text
 # and can cite it properly without hallucinating
 
 # Generate the BibTeX citation for the paper
-python verifisci.py cite 1706.03762 --type ARXIV
+verifisci cite 1706.03762 --type ARXIV
 ```
 
 ### Why `read` is important for LLM agents
