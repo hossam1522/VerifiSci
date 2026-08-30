@@ -27,3 +27,8 @@ Thumbs.db
 
 # Secrets
 .env
+
+# Go
+/verifisci
+/bin/
+/dist/
