@@ -1,17 +1,43 @@
 # VerifiSci
 
-CLI tool for academic paper search and citation generation. Designed for LLM agents to find and cite reliable academic sources when writing articles, theses, or research papers — without manual intervention.
+Fast, standalone CLI tool for academic paper search and citation generation. Built in Go with zero runtime dependencies. Designed for LLM agents and researchers to find and cite reliable academic sources without hallucination.
+
+## Installation
+
+### Option 1: Download Pre-compiled Binary (Recommended)
+Download the latest binary for your OS and architecture from [GitHub Releases](https://github.com/hossam1522/VerifiSci/releases):
+
+```bash
+# Linux (x86_64)
+curl -sSL https://github.com/hossam1522/VerifiSci/releases/latest/download/verifisci-linux-amd64.tar.gz | tar -xz
+sudo mv verifisci-linux-amd64 /usr/local/bin/verifisci
+
+# macOS (Apple Silicon M1-M4)
+curl -sSL https://github.com/hossam1522/VerifiSci/releases/latest/download/verifisci-darwin-arm64.tar.gz | tar -xz
+sudo mv verifisci-darwin-arm64 /usr/local/bin/verifisci
+```
+
+### Option 2: Using `go install`
+```bash
+go install github.com/hossam1522/VerifiSci@latest
+```
+
+### Option 3: Build from Source
+```bash
+git clone https://github.com/hossam1522/VerifiSci.git
+cd VerifiSci
+make build
+# Binary is built at ./bin/verifisci
+```
 
 ## Quick Start
 
 ```bash
-# One-time setup
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Search papers (JSON output by default for LLMs)
+verifisci search "graph neural networks" --limit 5
 
-# Search papers (JSON output by default)
-python verifisci.py search "graph neural networks" --limit 5
+# Human-readable output
+verifisci search "transformer architecture" --text
 ```
 
 ## Commands
@@ -20,25 +46,25 @@ python verifisci.py search "graph neural networks" --limit 5
 
 ```bash
 # Basic search (default source: openalex, no API key needed)
-python verifisci.py search "your query here" --limit 10
+verifisci search "your query here" --limit 10
 
 # Search all available free sources
-python verifisci.py search "attention mechanism" --source all --limit 15
+verifisci search "attention mechanism" --source all --limit 15
 
 # Filter by year
-python verifisci.py search "large language models" --year-from 2020 --year-to 2024
+verifisci search "large language models" --year-from 2020 --year-to 2024
 
 # Sort by citations (most cited first)
-python verifisci.py search "reinforcement learning" --sort citations
+verifisci search "reinforcement learning" --sort citations
 
 # Search arXiv preprints only
-python verifisci.py search "diffusion models" --source arxiv
+verifisci search "diffusion models" --source arxiv
 
 # Human-readable output (instead of JSON)
-python verifisci.py search "transformer architecture" --text
+verifisci search "transformer architecture" --text
 
 # BibTeX output for all results
-python verifisci.py search "graph neural networks" --bibtex
+verifisci search "graph neural networks" --bibtex
 ```
 
 **Options:**
@@ -60,32 +86,32 @@ python verifisci.py search "graph neural networks" --bibtex
 
 ```bash
 # BibTeX (default)
-python verifisci.py cite 10.1038/nature14539
+verifisci cite 10.1038/nature14539
 
 # APA format
-python verifisci.py cite 10.1038/nature14539 --format apa
+verifisci cite 10.1038/nature14539 --format apa
 
 # MLA format
-python verifisci.py cite 10.1038/nature14539 --format mla
+verifisci cite 10.1038/nature14539 --format mla
 
 # From arXiv ID
-python verifisci.py cite 1706.03762 --type ARXIV
+verifisci cite 1706.03762 --type ARXIV
 
 # From URL
-python verifisci.py cite "https://arxiv.org/abs/1706.03762" --type URL
+verifisci cite "https://arxiv.org/abs/1706.03762" --type URL
 ```
 
 ### `get` — Get full paper details
 
 ```bash
 # JSON output (default)
-python verifisci.py get 10.1038/nature14539
+verifisci get 10.1038/nature14539
 
 # Human-readable
-python verifisci.py get 10.1038/nature14539 --text
+verifisci get 10.1038/nature14539 --text
 
 # BibTeX for a specific paper
-python verifisci.py get 10.1038/nature14539 --bibtex
+verifisci get 10.1038/nature14539 --bibtex
 ```
 
 ### `read` — Read paper content (abstract, conclusions, full text)
@@ -94,29 +120,29 @@ This is the critical command for LLM agents writing articles: it extracts what t
 
 ```bash
 # Read an arXiv paper (gets metadata + abstract + full text + conclusions)
-python verifisci.py read https://arxiv.org/abs/1706.03762 --type URL
+verifisci read https://arxiv.org/abs/1706.03762 --type URL
 
 # Read by arXiv ID
-python verifisci.py read 1706.03762 --type ARXIV
+verifisci read 1706.03762 --type ARXIV
 
 # Read ONLY abstract and conclusions (ideal for LLM agents to save context tokens)
-python verifisci.py read 1706.03762 --type ARXIV --no-full-text --text
+verifisci read 1706.03762 --type ARXIV --no-full-text --text
 
 # Read only abstract or only conclusions
-python verifisci.py read 1706.03762 --type ARXIV --abstract-only --text
-python verifisci.py read 1706.03762 --type ARXIV --conclusions-only --text
+verifisci read 1706.03762 --type ARXIV --abstract-only --text
+verifisci read 1706.03762 --type ARXIV --conclusions-only --text
 
 # Read entire paper with unlimited characters
-python verifisci.py read 1706.03762 --type ARXIV --max-chars -1 --text
+verifisci read 1706.03762 --type ARXIV --max-chars -1 --text
 
 # Read a paper by DOI (gets metadata + abstract)
-python verifisci.py read 10.1038/nature14539
+verifisci read 10.1038/nature14539
 
 # Control character limit of extracted text
-python verifisci.py read 1706.03762 --type ARXIV --max-chars 10000
+verifisci read 1706.03762 --type ARXIV --max-chars 10000
 
 # Human-readable output (shows abstract, conclusions, and full text sections)
-python verifisci.py read 1706.03762 --type ARXIV --text
+verifisci read 1706.03762 --type ARXIV --text
 ```
 
 **Options for `read`:**
@@ -235,19 +261,19 @@ rm -rf ~/.cache/verifisci
 
 The tool is designed to be called from an LLM agent workflow:
 
-1. **Find sources:** `python verifisci.py search "topic" --limit 10 --json`
-2. **Read the paper:** `python verifisci.py read ARXIV_ID_OR_DOI --text` — extracts abstract, conclusions, and full text so the agent knows what the paper actually says
-3. **Get details:** `python verifisci.py get DOI --json`
-4. **Generate citation:** `python verifisci.py cite DOI --format bibtex`
+1. **Find sources:** `verifisci search "topic" --limit 10 --json`
+2. **Read the paper:** `verifisci read ARXIV_ID_OR_DOI --text` — extracts abstract, conclusions, and full text so the agent knows what the paper actually says
+3. **Get details:** `verifisci get DOI --json`
+4. **Generate citation:** `verifisci cite DOI --format bibtex`
 5. **Insert into document:** Use the BibTeX key and citation in your LaTeX/Markdown
 
 Example agent workflow:
 ```bash
 # Agent searches for references
-python verifisci.py search "transformer attention mechanism" --limit 5 --json
+verifisci search "transformer attention mechanism" --limit 5 --json
 
 # Agent reads the most relevant paper to understand it
-python verifisci.py read 1706.03762 --type ARXIV --text
+verifisci read 1706.03762 --type ARXIV --text
 
 # Agent now knows: what the paper argues, its conclusions, methodology
 # and can cite it properly without hallucinating
