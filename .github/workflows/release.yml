@@ -42,8 +42,10 @@ jobs:
             CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="$LDFLAGS" -o dist/$filename .
             if [ "$os" = "windows" ]; then
               zip -j "dist/verifisci-${TAG_NAME}-${os}-${arch}.zip" "dist/$filename"
+              cp "dist/verifisci-${TAG_NAME}-${os}-${arch}.zip" "dist/verifisci-${os}-${arch}.zip"
             else
               tar -czvf "dist/verifisci-${TAG_NAME}-${os}-${arch}.tar.gz" -C dist "$filename"
+              cp "dist/verifisci-${TAG_NAME}-${os}-${arch}.tar.gz" "dist/verifisci-${os}-${arch}.tar.gz"
             fi
           done
 
