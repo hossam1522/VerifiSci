@@ -17,13 +17,13 @@ import json
 import sys
 import time
 import os
+import re
 import hashlib
 import textwrap
 from typing import Optional
 from urllib.parse import quote_plus
 
 import requests
-import httpx
 
 # ---------------------------------------------------------------------------
 # Cache utilities
@@ -79,10 +79,14 @@ def safe_get(url: str, params: dict = None, timeout: int = 15, max_retries: int 
             return r
         except requests.RequestException as e:
             last_exc = e
+            # Fail fast on non-transient 4xx errors (e.g. 404 Not Found, 400 Bad Request)
+            resp = getattr(e, "response", None)
+            if resp is not None and 400 <= resp.status_code < 500 and resp.status_code != 429:
+                raise
             if attempt == max_retries - 1:
                 raise
             # Only retry on transient errors
-            if getattr(e, "response", None) is not None and e.response.status_code == 429:
+            if resp is not None and resp.status_code == 429:
                 time.sleep(2 ** attempt)
                 continue
             time.sleep(1 * (attempt + 1))
@@ -93,12 +97,22 @@ def safe_get(url: str, params: dict = None, timeout: int = 15, max_retries: int 
 # than HTTP/2 ones, even with a valid key and matching headers — confirmed by comparing
 # a Postman capture (HTTP/2, 200) against plain curl/requests (HTTP/1.1, 429) on the
 # same request. `requests` has no HTTP/2 support, so this uses httpx for that host only.
-HTTP2_CLIENT = httpx.Client(http2=True, timeout=15)
+HTTP2_CLIENT = None
 
 
 def safe_get_http2(url: str, params: dict = None, timeout: int = 15, max_retries: int = 3,
                     headers: dict = None):
     """GET over HTTP/2 with retries and exponential backoff."""
+    global HTTP2_CLIENT
+    if HTTP2_CLIENT is None:
+        try:
+            import httpx
+            HTTP2_CLIENT = httpx.Client(http2=True, timeout=15)
+        except ImportError:
+            # Fallback to requests if httpx is not installed
+            return safe_get(url, params=params, timeout=timeout, max_retries=max_retries, headers=headers)
+
+    import httpx
     last_exc = None
     for attempt in range(max_retries):
         try:
@@ -295,6 +309,9 @@ def search_semantic_scholar(query: str, limit: int = 10, year_from: str = "",
 
 def get_semantic_paper(identifier: str, id_type: str = "DOI") -> Optional[dict]:
     """Get paper details from Semantic Scholar by DOI, ArXiv ID, etc."""
+    if not SEMANTIC_API_KEY:
+        return None
+
     cache_k = _cache_key("semantic_paper", identifier, id_type)
     cached = _cache_get(cache_k, max_age_s=3600)
     if cached:
@@ -657,6 +674,104 @@ def search_arxiv(query: str, limit: int = 10) -> list:
     return results
 
 
+def _enrich_paper_metadata(paper: dict):
+    """Attempt to enrich paper with citation count and DOI from OpenAlex or Semantic Scholar."""
+    if not paper or not paper.get("title"):
+        return
+
+    # Try Semantic Scholar if key available
+    if SEMANTIC_API_KEY and paper.get("arxiv_id"):
+        try:
+            sp = get_semantic_paper(paper["arxiv_id"], "ARXIV")
+            if sp:
+                if not paper.get("citations") and sp.get("citations"):
+                    paper["citations"] = sp["citations"]
+                if not paper.get("doi") and sp.get("doi"):
+                    paper["doi"] = sp["doi"]
+                if sp.get("venue") and paper.get("venue") in ("", "arXiv"):
+                    paper["venue"] = sp["venue"]
+                return
+        except Exception:
+            pass
+
+    # Try OpenAlex title search
+    try:
+        title = paper["title"]
+        url = f"{OPENALEX_BASE}?filter=title.search:{quote_plus(title)}&per_page=3"
+        r = safe_get(url, timeout=10)
+        data = r.json()
+        results = data.get("results", [])
+        for item in results:
+            t = item.get("title") or ""
+            clean_t1 = re.sub(r"[^\w\s]", "", t).lower().strip()
+            clean_t2 = re.sub(r"[^\w\s]", "", title).lower().strip()
+            if clean_t1 == clean_t2 or (len(clean_t1) > 10 and clean_t1 in clean_t2):
+                if not paper.get("citations") and item.get("cited_by_count"):
+                    paper["citations"] = item.get("cited_by_count", 0)
+                doi = (item.get("doi") or "").replace("https://doi.org/", "")
+                if not paper.get("doi") and doi:
+                    paper["doi"] = doi
+                return
+    except Exception:
+        pass
+
+
+def get_arxiv_paper(arxiv_id: str) -> Optional[dict]:
+    """Fetch metadata for an arXiv paper by ID and enrich citation count."""
+    cache_k = _cache_key("arxiv_paper", arxiv_id)
+    cached = _cache_get(cache_k, max_age_s=3600)
+    if cached:
+        return cached
+
+    try:
+        import xml.etree.ElementTree as ET
+        r = safe_get(f"{ARXIV_BASE}?id_list={arxiv_id}&max_results=1", timeout=15)
+        atom_ns = "http://www.w3.org/2005/Atom"
+        root = ET.fromstring(r.text)
+        entry = root.find(f"{{{atom_ns}}}entry")
+        if entry is None:
+            return None
+
+        title_el = entry.find(f"{{{atom_ns}}}title")
+        title = title_el.text.strip().replace("\n", " ") if title_el is not None and title_el.text else ""
+        if not title or title.lower() == "error":
+            return None
+
+        authors = []
+        for a in entry.findall(f"{{{atom_ns}}}author"):
+            name_el = a.find(f"{{{atom_ns}}}name")
+            if name_el is not None and name_el.text:
+                authors.append(name_el.text)
+
+        summary_el = entry.find(f"{{{atom_ns}}}summary")
+        abstract = summary_el.text.strip().replace("\n", " ") if summary_el is not None and summary_el.text else ""
+        published_el = entry.find(f"{{{atom_ns}}}published")
+        published = published_el.text if published_el is not None and published_el.text else ""
+        year = published[:4] if published else ""
+
+        paper = paper_dict(
+            title=title,
+            authors=authors,
+            year=year,
+            doi="",
+            url=f"http://arxiv.org/abs/{arxiv_id}",
+            venue="arXiv",
+            citations=0,
+            abstract=abstract,
+            source="arxiv",
+            pdf_url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+            bibtex_key=make_bibtex_key(authors, year, title),
+            arxiv_id=arxiv_id,
+            type_="article",
+        )
+
+        _enrich_paper_metadata(paper)
+        _cache_set(cache_k, paper)
+        return paper
+    except Exception:
+        return None
+
+
 # ===================================================================
 # Combined search
 # ===================================================================
@@ -751,32 +866,28 @@ def generate_citation(identifier: str, id_type: str = "DOI",
     """Look up a paper and generate citation in specified format."""
     paper = None
 
-    # Try Semantic Scholar first
-    if id_type.upper() in ("DOI", "ARXIV", "PMID", "CORPUSID"):
+    # ArXiv paper
+    if id_type.upper() == "ARXIV" or ("arxiv.org/" in identifier):
+        arxiv_id = identifier.split("arxiv.org/abs/")[-1].split("arxiv.org/pdf/")[-1].strip().rstrip("/").rstrip(".pdf")
+        paper = get_arxiv_paper(arxiv_id)
+
+    # Try Semantic Scholar if key available
+    if not paper and SEMANTIC_API_KEY and id_type.upper() in ("DOI", "ARXIV", "PMID", "CORPUSID"):
         paper = get_semantic_paper(identifier, id_type)
-    elif id_type.upper() == "URL":
-        # Extract DOI from URL if possible
-        if "doi.org/" in identifier:
-            doi = identifier.split("doi.org/")[-1].strip()
-            paper = get_semantic_paper(doi, "DOI")
-        elif "arxiv.org/abs/" in identifier:
-            arxiv_id = identifier.split("arxiv.org/abs/")[-1].strip().rstrip("/")
-            paper = get_semantic_paper(arxiv_id, "ARXIV")
 
     # Fallback: OpenAlex
     if not paper:
-        oa_id = identifier
-        if id_type.upper() == "ARXIV":
-            oa_id = f"https://arxiv.org/abs/{identifier}"
-        elif id_type.upper() == "DOI" and not oa_id.startswith("http"):
-            oa_id = f"https://doi.org/{identifier}"
+        doi = identifier
+        if "doi.org/" in identifier:
+            doi = identifier.split("doi.org/")[-1].strip()
+        oa_id = doi if doi.startswith("http") else f"https://doi.org/{doi}"
         try:
-            r = safe_get(f"https://api.openalex.org/works/{oa_id}")
+            r = safe_get(f"https://api.openalex.org/works/{oa_id}", timeout=15)
             item = r.json()
             if item and item.get("title"):
                 authorship = item.get("authorships", [])
                 authors = [a.get("author", {}).get("display_name", "") for a in authorship]
-                doi = (item.get("doi") or "").replace("https://doi.org/", "")
+                doi_str = (item.get("doi") or "").replace("https://doi.org/", "")
                 title = item.get("title", "") or ""
                 year = str(item.get("publication_year", ""))
                 primary_loc = item.get("primary_location", {}) or {}
@@ -787,8 +898,8 @@ def generate_citation(identifier: str, id_type: str = "DOI",
                     words = sorted(inv_idx.items(), key=lambda x: x[1][0] if x[1] else 0)
                     abstract = " ".join(w[0] for w in words)
                 paper = paper_dict(
-                    title=title, authors=authors, year=year, doi=doi,
-                    url=item.get("doi", f"https://doi.org/{doi}") if doi else "",
+                    title=title, authors=authors, year=year, doi=doi_str or doi,
+                    url=item.get("doi", f"https://doi.org/{doi_str or doi}") if (doi_str or doi) else "",
                     venue=source_info.get("display_name", ""),
                     journal=source_info.get("display_name", ""),
                     citations=item.get("cited_by_count", 0), abstract=abstract,
@@ -800,13 +911,14 @@ def generate_citation(identifier: str, id_type: str = "DOI",
                     publisher=item.get("host_venue", {}).get("publisher", ""),
                     bibtex_key=make_bibtex_key(authors, year, title),
                 )
-        except Exception as e:
+        except Exception:
             pass
 
     # Fallback: CrossRef
-    if not paper and id_type.upper() == "DOI":
+    if not paper and (id_type.upper() == "DOI" or "doi.org" in identifier):
+        doi = identifier.split("doi.org/")[-1].strip()
         try:
-            r = safe_get(f"{CROSSREF_BASE}/{identifier}")
+            r = safe_get(f"{CROSSREF_BASE}/{doi}", timeout=15)
             item = r.json().get("message", {})
             if item:
                 authors = []
@@ -819,8 +931,8 @@ def generate_citation(identifier: str, id_type: str = "DOI",
                 year = str(dp[0][0]) if dp and dp[0] else ""
                 title = (item.get("title", [""]) or [""])[0]
                 paper = paper_dict(
-                    title=title, authors=authors, year=year, doi=identifier,
-                    url=f"https://doi.org/{identifier}",
+                    title=title, authors=authors, year=year, doi=doi,
+                    url=f"https://doi.org/{doi}",
                     venue=item.get("publisher", ""),
                     journal=(item.get("container-title", [""]) or [""])[0],
                     volume=item.get("volume", ""), issue=item.get("issue", ""),
@@ -874,47 +986,94 @@ def generate_citation(identifier: str, id_type: str = "DOI",
 # Read paper content (abstract, conclusions, full text for arXiv)
 # ===================================================================
 
-def extract_section(text: str, section_names: list, max_chars: int = 4000) -> str:
+def extract_section(text: str, section_names: list, max_chars: int = 5000) -> str:
     """Extract text under common section headings like Conclusion, Abstract, etc."""
+    if not text:
+        return ""
+
     lines = text.split("\n")
     in_section = False
-    collected = []
+    collected_lines = []
     chars = 0
 
+    # Match section headings such as:
+    # "6 Conclusion", "6. Conclusion", "VI. Conclusion", "Conclusion", "Conclusions and Future Work", etc.
+    header_pattern = re.compile(
+        r'^(?:(?:section\s+)?(?:\d+|[ivxlcdm]+)(?:\.\d+)*[\.:\)]?\s+)?(' +
+        '|'.join(re.escape(s) for s in section_names) +
+        r')(?:\s*[:\-–—\.]|\s+and\s+.*|\s+remarks|\s*$)',
+        re.IGNORECASE
+    )
+
+    exit_keywords = [
+        "references", "bibliography", "acknowledgments", "acknowledgements",
+        "appendix", "appendices", "author contributions", "competing interests",
+        "funding", "data availability", "code availability", "declarations",
+    ]
+    exit_pattern = re.compile(
+        r'^(?:(?:section\s+)?(?:\d+|[ivxlcdm]+)(?:\.\d+)*[\.:\)]?\s+)?(' +
+        '|'.join(re.escape(k) for k in exit_keywords) +
+        r')(?:\s*[:\-–—\.]|\s*$)',
+        re.IGNORECASE
+    )
+
+    next_sec_pattern = re.compile(r'^\d+\s+[A-Z][a-zA-Z\s]{2,40}$')
+
     for line in lines:
-        stripped = line.strip().lower().rstrip(".")
-        # Check if we're entering a target section
-        if any(stripped == s.lower() or stripped.startswith(s.lower())
-               for s in section_names):
-            in_section = True
+        stripped = line.strip()
+        if not stripped:
+            if in_section and collected_lines and collected_lines[-1] != "":
+                collected_lines.append("")
             continue
-        # Check if we're entering a new section (exit current)
-        if in_section and (
-            stripped in ["abstract", "introduction", "related work", "references",
-                         "acknowledgments", "appendix", "method", "methods",
-                         "methodology", "results", "discussion", "conclusion",
-                         "background", "preliminaries", "experiments", "evaluation",
-                         "limitations", "future work", "bibliography"]
-            or (stripped and (
-                stripped[0].isdigit() and "." in stripped[:4] and len(stripped) < 60
-            ))
-        ):
-            if stripped not in ["conclusion", "conclusions", "concluding remarks",
-                                "summary", "discussion and conclusion"]:
+
+        if not in_section:
+            if len(stripped) < 80 and header_pattern.match(stripped):
+                in_section = True
+                continue
+
+        if in_section:
+            if len(stripped) < 80 and (exit_pattern.match(stripped) or next_sec_pattern.match(stripped)):
                 break
 
-        if in_section and stripped:
-            collected.append(line.strip())
-            chars += len(line)
+            ack_match = re.search(r'\b(?:acknowledg(?:e)?ments?|references|bibliography)\b', stripped, re.IGNORECASE)
+            if ack_match:
+                prefix = stripped[:ack_match.start()].strip()
+                if prefix:
+                    collected_lines.append(prefix)
+                break
+
+            collected_lines.append(stripped)
+            chars += len(stripped)
             if chars > max_chars:
-                collected.append("[...truncated...]")
+                collected_lines.append("[...truncated...]")
                 break
 
-    return " ".join(collected) if collected else ""
+    if not collected_lines:
+        return ""
+
+    paragraphs = []
+    current_p = []
+    for line in collected_lines:
+        if line == "":
+            if current_p:
+                paragraphs.append(" ".join(current_p))
+                current_p = []
+        elif line == "[...truncated...]":
+            if current_p:
+                paragraphs.append(" ".join(current_p))
+                current_p = []
+            paragraphs.append(line)
+        else:
+            current_p.append(line)
+    if current_p:
+        paragraphs.append(" ".join(current_p))
+
+    return "\n\n".join(paragraphs)
 
 
 def read_paper(identifier: str, id_type: str = "DOI",
-               max_content_chars: int = 20000) -> dict:
+               max_content_chars: int = 20000,
+               include_full_text: bool = True) -> dict:
     """Read a paper: get metadata, abstract, and attempt to get full text.
     Returns a dict with: metadata, abstract, full_text (if available),
     conclusions, key_points.
@@ -941,50 +1100,24 @@ def read_paper(identifier: str, id_type: str = "DOI",
     elif "arxiv.org/pdf/" in identifier:
         arxiv_id = identifier.split("arxiv.org/pdf/")[-1].strip().rstrip("/").rstrip(".pdf")
 
-    # Step 1a: For arXiv papers, get metadata from arXiv API
+    # Step 1a: For arXiv papers, get metadata
     if arxiv_id:
-        try:
-            import xml.etree.ElementTree as ET
-            r = safe_get(f"http://export.arxiv.org/api/query?id_list={arxiv_id}&max_results=1", timeout=15)
-            atom_ns = "http://www.w3.org/2005/Atom"
-            root = ET.fromstring(r.text)
-            entry = root.find(f"{{{atom_ns}}}entry")
-            if entry is not None:
-                title_el = entry.find(f"{{{atom_ns}}}title")
-                title = title_el.text.strip().replace("\n", " ") if title_el is not None and title_el.text else ""
-                authors = []
-                for a in entry.findall(f"{{{atom_ns}}}author"):
-                    name_el = a.find(f"{{{atom_ns}}}name")
-                    if name_el is not None and name_el.text:
-                        authors.append(name_el.text)
-                summary_el = entry.find(f"{{{atom_ns}}}summary")
-                abstract = summary_el.text.strip().replace("\n", " ") if summary_el is not None and summary_el.text else ""
-                published_el = entry.find(f"{{{atom_ns}}}published")
-                published = published_el.text if published_el is not None and published_el.text else ""
-                year = published[:4] if published else ""
-                paper = paper_dict(
-                    title=title, authors=authors, year=year,
-                    url=f"http://arxiv.org/abs/{arxiv_id}",
-                    venue="arXiv", abstract=abstract, source="arxiv",
-                    pdf_url=f"https://arxiv.org/pdf/{arxiv_id}.pdf",
-                    bibtex_key=make_bibtex_key(authors, year, title),
-                    arxiv_id=arxiv_id,
-                )
-        except Exception as e:
-            result["error"] = f"arXiv metadata failed: {e}"
+        paper = get_arxiv_paper(arxiv_id)
 
-    # Step 1b: For non-arxiv papers, get metadata from OpenAlex
+    # Step 1b: For non-arxiv papers, get metadata from OpenAlex / CrossRef / Semantic Scholar
     if not paper and not arxiv_id:
-        oa_id = identifier
-        if id_type.upper() == "DOI" and not identifier.startswith("http"):
-            oa_id = f"https://doi.org/{identifier}"
+        doi = identifier
+        if id_type.upper() == "URL" and "doi.org/" in identifier:
+            doi = identifier.split("doi.org/")[-1].strip()
+
+        oa_id = doi if doi.startswith("http") else f"https://doi.org/{doi}"
         try:
-            r = safe_get(f"https://api.openalex.org/works/{oa_id}")
+            r = safe_get(f"https://api.openalex.org/works/{oa_id}", timeout=15)
             item = r.json()
             if item and item.get("title"):
                 authorship = item.get("authorships", [])
                 authors = [a.get("author", {}).get("display_name", "") for a in authorship]
-                doi = (item.get("doi") or "").replace("https://doi.org/", "")
+                doi_str = (item.get("doi") or "").replace("https://doi.org/", "")
                 title = item.get("title", "") or ""
                 year = str(item.get("publication_year", ""))
                 primary_loc = item.get("primary_location", {}) or {}
@@ -997,8 +1130,8 @@ def read_paper(identifier: str, id_type: str = "DOI",
                     abstract = " ".join(w[0] for w in words)
 
                 paper = paper_dict(
-                    title=title, authors=authors, year=year, doi=doi,
-                    url=item.get("doi", f"https://doi.org/{doi}") if doi else "",
+                    title=title, authors=authors, year=year, doi=doi_str or doi,
+                    url=item.get("doi", f"https://doi.org/{doi_str or doi}") if (doi_str or doi) else "",
                     venue=source_info.get("display_name", ""),
                     journal=source_info.get("display_name", ""),
                     citations=item.get("cited_by_count", 0), abstract=abstract,
@@ -1012,53 +1145,74 @@ def read_paper(identifier: str, id_type: str = "DOI",
                     arxiv_id="",
                 )
         except Exception as e:
-            result["error"] = f"OpenAlex lookup failed: {e}"
+            result["error"] = f"Metadata lookup failed: {e}"
 
     result["metadata"] = paper
     result["abstract"] = paper["abstract"] if paper else ""
 
     # Step 2: Try to get full text from PDF
-    pdf_url = paper.get("pdf_url", "") if paper else ""
-
-    # For arXiv papers, PDF URL is always available
+    pdf_url = ""
     if arxiv_id:
         pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        try:
-            text = download_and_extract_pdf_text(pdf_url, max_chars=max_content_chars)
-            if text:
-                result["source_of_text"] = "pdf"
-                result["full_text"] = text[:max_content_chars]
+    elif paper and paper.get("pdf_url"):
+        pdf_url = paper.get("pdf_url", "")
 
-                # Extract conclusions
+    if pdf_url:
+        try:
+            full_pdf_text = download_and_extract_pdf_text(pdf_url, max_chars=150000)
+            if full_pdf_text:
+                result["source_of_text"] = "pdf"
+
+                # Extract conclusions from full text
                 conclusion_sections = [
                     "conclusion", "conclusions", "concluding remarks",
                     "discussion and conclusion", "summary and conclusion",
-                    "summary", "final remarks", "discussion",
+                    "conclusions and future work", "summary", "discussion",
                 ]
-                result["conclusions"] = extract_section(text, conclusion_sections, 5000)
+                result["conclusions"] = extract_section(full_pdf_text, conclusion_sections, 5000)
 
-                # If no conclusion found, take last ~3000 chars
-                if not result["conclusions"] and len(text) > 3000:
-                    result["conclusions"] = text[-3000:]
+                # Store full_text if requested
+                if include_full_text and max_content_chars != 0:
+                    if max_content_chars == -1 or len(full_pdf_text) <= max_content_chars:
+                        result["full_text"] = full_pdf_text
+                    else:
+                        remaining = len(full_pdf_text) - max_content_chars
+                        result["full_text"] = (
+                            full_pdf_text[:max_content_chars] +
+                            f"\n\n[... Full text truncated at {max_content_chars} characters ({remaining} chars omitted). Use --no-full-text for summary only, or --max-chars -1 for complete text ...]"
+                        )
         except Exception as e:
-            result["error"] = (result.get("error") or "") + f"PDF extraction failed: {e}"
+            result["error"] = (result.get("error") or "") + f" PDF extraction failed: {e}"
 
     return result
 
 
-def download_and_extract_pdf_text(url: str, max_chars: int = 20000) -> str:
+def download_and_extract_pdf_text(url: str, max_chars: int = 150000) -> str:
     """Download a PDF and extract its text content."""
     try:
         r = safe_get(url, timeout=30)
         if r.status_code != 200:
             return ""
 
-        # Save to temp file and extract with PyPDF2
-        import tempfile
         import io
 
         try:
             from PyPDF2 import PdfReader
+            pdf_file = io.BytesIO(r.content)
+            reader = PdfReader(pdf_file)
+            text_parts = []
+            total_chars = 0
+            max_pages = min(len(reader.pages), 50)
+
+            for i in range(max_pages):
+                page_text = reader.pages[i].extract_text() or ""
+                text_parts.append(page_text)
+                total_chars += len(page_text)
+                if total_chars > max_chars:
+                    break
+
+            return "\n\n".join(text_parts)[:max_chars]
+
         except ImportError:
             # Fallback: try pdftotext command line tool
             import subprocess
@@ -1068,27 +1222,13 @@ def download_and_extract_pdf_text(url: str, max_chars: int = 20000) -> str:
                 tmp_path = f.name
             try:
                 result = subprocess.run(
-                    ["pdftotext", "-l", "20", tmp_path, "-"],
+                    ["pdftotext", "-l", "50", tmp_path, "-"],
                     capture_output=True, text=True, timeout=30
                 )
                 return result.stdout[:max_chars]
             finally:
-                os.unlink(tmp_path)
-
-        pdf_file = io.BytesIO(r.content)
-        reader = PdfReader(pdf_file)
-        text_parts = []
-        total_chars = 0
-        max_pages = min(len(reader.pages), 30)
-
-        for i in range(max_pages):
-            page_text = reader.pages[i].extract_text() or ""
-            text_parts.append(page_text)
-            total_chars += len(page_text)
-            if total_chars > max_chars:
-                break
-
-        return "\n\n".join(text_parts)[:max_chars]
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
 
     except Exception:
         return ""
@@ -1117,7 +1257,13 @@ def main():
               %(prog)s search "diffusion models" --source arxiv
 
               # Read a paper's content (abstract + conclusions + full text)
-              %(prog)s read 1706.03762 --type ARXIV
+              %(prog)s read 1706.03762 --type ARXIV --text
+
+              # Read ONLY abstract and conclusions (saves tokens for LLM context)
+              %(prog)s read 1706.03762 --type ARXIV --no-full-text --text
+
+              # Read entire full text without truncation limit
+              %(prog)s read 1706.03762 --type ARXIV --max-chars -1 --text
 
               # Generate BibTeX citation from DOI
               %(prog)s cite 10.1038/nature14539
@@ -1185,7 +1331,13 @@ def main():
                     choices=["DOI", "ARXIV", "URL"],
                     help="Identifier type (default: DOI)")
     rp.add_argument("--max-chars", type=int, default=20000,
-                    help="Max characters of full text (default: 20000)")
+                    help="Max characters of full text (default: 20000, use -1 for unlimited, 0 to omit)")
+    rp.add_argument("--no-full-text", "--summary", action="store_true",
+                    help="Only output metadata, abstract, and conclusions (omits full text to save LLM context)")
+    rp.add_argument("--abstract-only", action="store_true",
+                    help="Only output metadata and abstract")
+    rp.add_argument("--conclusions-only", action="store_true",
+                    help="Only output metadata and conclusions")
     rp.add_argument("--json", "-j", action="store_true", help="Output as JSON (default)")
     rp.add_argument("--text", action="store_true", help="Output as readable text")
 
@@ -1244,46 +1396,56 @@ def main():
             sys.exit(1)
 
     elif args.command == "get":
-        id_type_map = {
-            "DOI": "DOI", "ARXIV": "ARXIV", "URL": "URL",
-            "PMID": "PMID", "CORPUSID": "CorpusId"
-        }
-        id_type = id_type_map.get(args.type, "DOI")
-        paper = get_semantic_paper(args.identifier, id_type)
+        paper = None
+        if args.type == "ARXIV" or "arxiv.org/" in args.identifier:
+            arxiv_id = args.identifier.split("arxiv.org/abs/")[-1].split("arxiv.org/pdf/")[-1].strip().rstrip("/").rstrip(".pdf")
+            paper = get_arxiv_paper(arxiv_id)
+        elif SEMANTIC_API_KEY:
+            id_type_map = {
+                "DOI": "DOI", "ARXIV": "ARXIV", "URL": "URL",
+                "PMID": "PMID", "CORPUSID": "CorpusId"
+            }
+            id_type = id_type_map.get(args.type, "DOI")
+            paper = get_semantic_paper(args.identifier, id_type)
 
         # Fallback to OpenAlex lookup via DOI
-        if not paper and (id_type == "DOI" or args.type == "DOI"):
+        if not paper:
+            doi = args.identifier
+            if "doi.org/" in args.identifier:
+                doi = args.identifier.split("doi.org/")[-1].strip()
+            oa_id = doi if doi.startswith("http") else f"https://doi.org/{doi}"
             try:
-                r = safe_get(f"https://api.openalex.org/works/https://doi.org/{args.identifier}")
+                r = safe_get(f"https://api.openalex.org/works/{oa_id}", timeout=15)
                 item = r.json()
-                authorship = item.get("authorships", [])
-                authors = [a.get("author", {}).get("display_name", "") for a in authorship]
-                doi = (item.get("doi") or "").replace("https://doi.org/", "")
-                title = item.get("title", "") or ""
-                year = str(item.get("publication_year", ""))
-                primary_loc = item.get("primary_location", {}) or {}
-                source_info = primary_loc.get("source", {}) or {}
+                if item and item.get("title"):
+                    authorship = item.get("authorships", [])
+                    authors = [a.get("author", {}).get("display_name", "") for a in authorship]
+                    doi_str = (item.get("doi") or "").replace("https://doi.org/", "")
+                    title = item.get("title", "") or ""
+                    year = str(item.get("publication_year", ""))
+                    primary_loc = item.get("primary_location", {}) or {}
+                    source_info = primary_loc.get("source", {}) or {}
 
-                inv_idx = item.get("abstract_inverted_index") or {}
-                abstract = ""
-                if inv_idx:
-                    words = sorted(inv_idx.items(), key=lambda x: x[1][0] if x[1] else 0)
-                    abstract = " ".join(w[0] for w in words)
+                    inv_idx = item.get("abstract_inverted_index") or {}
+                    abstract = ""
+                    if inv_idx:
+                        words = sorted(inv_idx.items(), key=lambda x: x[1][0] if x[1] else 0)
+                        abstract = " ".join(w[0] for w in words)
 
-                paper = paper_dict(
-                    title=title, authors=authors, year=year, doi=doi,
-                    url=item.get("doi", f"https://doi.org/{doi}") if doi else "",
-                    venue=source_info.get("display_name", ""),
-                    journal=source_info.get("display_name", ""),
-                    citations=item.get("cited_by_count", 0), abstract=abstract,
-                    source="openalex",
-                    pdf_url=(primary_loc.get("pdf_url", "") if primary_loc else ""),
-                    volume=item.get("biblio", {}).get("volume", ""),
-                    issue=item.get("biblio", {}).get("issue", ""),
-                    pages=f"{item.get('biblio',{}).get('first_page','')}-{item.get('biblio',{}).get('last_page','')}".strip("-"),
-                    publisher=item.get("host_venue", {}).get("publisher", ""),
-                    bibtex_key=make_bibtex_key(authors, year, title),
-                )
+                    paper = paper_dict(
+                        title=title, authors=authors, year=year, doi=doi_str or doi,
+                        url=item.get("doi", f"https://doi.org/{doi_str or doi}") if (doi_str or doi) else "",
+                        venue=source_info.get("display_name", ""),
+                        journal=source_info.get("display_name", ""),
+                        citations=item.get("cited_by_count", 0), abstract=abstract,
+                        source="openalex",
+                        pdf_url=(primary_loc.get("pdf_url", "") if primary_loc else ""),
+                        volume=item.get("biblio", {}).get("volume", ""),
+                        issue=item.get("biblio", {}).get("issue", ""),
+                        pages=f"{item.get('biblio',{}).get('first_page','')}-{item.get('biblio',{}).get('last_page','')}".strip("-"),
+                        publisher=(item.get("host_venue") or {}).get("publisher", ""),
+                        bibtex_key=make_bibtex_key(authors, year, title),
+                    )
             except Exception:
                 pass
 
@@ -1310,7 +1472,20 @@ def main():
             "DOI": "DOI", "ARXIV": "ARXIV", "URL": "URL",
         }
         id_type = id_type_map.get(args.type, "DOI")
-        result = read_paper(args.identifier, id_type, max_content_chars=args.max_chars)
+        
+        include_full_text = not (args.no_full_text or args.abstract_only or args.conclusions_only or args.max_chars == 0)
+        max_chars = 0 if not include_full_text else args.max_chars
+
+        result = read_paper(args.identifier, id_type, max_content_chars=max_chars, include_full_text=include_full_text)
+
+        if args.abstract_only:
+            result["conclusions"] = ""
+            result["full_text"] = ""
+        elif args.conclusions_only:
+            result["abstract"] = ""
+            result["full_text"] = ""
+        elif not include_full_text:
+            result["full_text"] = ""
 
         if args.text:
             md = result.get("metadata") or {}
@@ -1322,25 +1497,25 @@ def main():
             print(f"URL: {md.get('url', 'N/A')}")
             print(f"{'='*70}")
 
-            if result.get("abstract"):
+            if result.get("abstract") and not args.conclusions_only:
                 print(f"\n--- ABSTRACT ---")
                 print(result["abstract"][:2000])
 
-            if result.get("conclusions"):
+            if result.get("conclusions") and not args.abstract_only:
                 print(f"\n--- CONCLUSIONS ---")
-                print(result["conclusions"][:3000])
+                print(result["conclusions"])
 
-            if result.get("full_text"):
+            if result.get("full_text") and include_full_text:
                 print(f"\n--- FULL TEXT (source: {result['source_of_text']}) ---")
-                print(result["full_text"][:result.get("max_chars", 5000)])
+                print(result["full_text"])
 
             if result.get("error"):
                 print(f"\n[NOTE] {result['error']}")
         else:
-            # JSON output: strip full_text if too long for practical use
+            # JSON output: strip full_text if too long for practical use unless -1 requested
             output = dict(result)
-            if output.get("full_text") and len(output["full_text"]) > 5000:
-                output["full_text"] = output["full_text"][:5000] + " [...truncated, use --text for more]"
+            if output.get("full_text") and len(output["full_text"]) > 5000 and not (args.max_chars == -1 or args.max_chars > 5000):
+                output["full_text"] = output["full_text"][:5000] + " [...truncated in JSON, use --text or --max-chars -1 for more]"
             print(json.dumps(output, indent=2, ensure_ascii=False, default=str))
 
 

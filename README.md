@@ -99,21 +99,42 @@ python verifisci.py read https://arxiv.org/abs/1706.03762 --type URL
 # Read by arXiv ID
 python verifisci.py read 1706.03762 --type ARXIV
 
+# Read ONLY abstract and conclusions (ideal for LLM agents to save context tokens)
+python verifisci.py read 1706.03762 --type ARXIV --no-full-text --text
+
+# Read only abstract or only conclusions
+python verifisci.py read 1706.03762 --type ARXIV --abstract-only --text
+python verifisci.py read 1706.03762 --type ARXIV --conclusions-only --text
+
+# Read entire paper with unlimited characters
+python verifisci.py read 1706.03762 --type ARXIV --max-chars -1 --text
+
 # Read a paper by DOI (gets metadata + abstract)
 python verifisci.py read 10.1038/nature14539
 
-# Control how much text to extract
+# Control character limit of extracted text
 python verifisci.py read 1706.03762 --type ARXIV --max-chars 10000
 
 # Human-readable output (shows abstract, conclusions, and full text sections)
 python verifisci.py read 1706.03762 --type ARXIV --text
 ```
 
+**Options for `read`:**
+
+| Flag | Description |
+|------|-------------|
+| `--no-full-text`, `--summary` | Omits the full text entirely. Only returns metadata, abstract, and conclusions (great for minimizing LLM context tokens). |
+| `--abstract-only` | Only returns metadata and abstract. |
+| `--conclusions-only` | Only returns metadata and conclusions. |
+| `--max-chars N` | Maximum characters of full text (default: 20000, `0` to omit, `-1` for unlimited). |
+| `--text`, `-t` | Output in clean, readable text format. |
+| `--json`, `-j` | Output as JSON (default). |
+
 **What `read` extracts:**
-- **Metadata**: title, authors, year, DOI, URL
+- **Metadata**: title, authors, year, DOI, URL, citations
 - **Abstract**: full paper abstract
 - **Conclusions**: the conclusion/discussion section automatically extracted from the PDF
-- **Full text**: the first ~20,000 characters of the paper (for arXiv/open-access papers)
+- **Full text**: full paper text (or truncated at `--max-chars`, omitted when `--no-full-text` is used)
 
 **Note on paywalled papers:** For papers behind paywalls (e.g., Nature, IEEE), `read` will get metadata and abstract but cannot access the full text. arXiv papers are always fully accessible.
 
